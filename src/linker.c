@@ -110,6 +110,11 @@
 
 static size_t system_page_size;
 
+static char **g_user_search_paths = NULL;
+static size_t g_user_search_paths_count = 0;
+static size_t g_user_search_paths_capacity = 0;
+static bool g_linker_internal_inited = false;
+
 static inline uintptr_t _page_start(uintptr_t addr) {
   return ALIGN_DOWN(addr, system_page_size);
 }
@@ -123,6 +128,83 @@ static inline uintptr_t _page_end(uintptr_t addr) {
 int g_argc = 0;
 char **g_argv = NULL;
 char **g_envp = NULL;
+
+static void _linker_user_search_paths_clear() {
+  for (size_t i = 0; i < g_user_search_paths_count; i++) free(g_user_search_paths[i]);
+  free(g_user_search_paths);
+  g_user_search_paths = NULL;
+  g_user_search_paths_count = 0;
+  g_user_search_paths_capacity = 0;
+}
+
+static bool _linker_user_search_paths_add_one(const char *dir_path) {
+  if (!dir_path) return false;
+  while (*dir_path == ' ' || *dir_path == '\t' || *dir_path == '\n') dir_path++;
+  if (*dir_path == '\0') return false;
+
+  size_t len = strlen(dir_path);
+  while (len > 0 && (dir_path[len - 1] == ' ' || dir_path[len - 1] == '\t' || dir_path[len - 1] == '\n')) len--;
+  if (len == 0) return false;
+
+  bool needs_slash = dir_path[len - 1] != '/';
+  size_t norm_len = len + (needs_slash ? 1 : 0);
+
+  char *norm = (char *)malloc(norm_len + 1);
+  if (!norm) return false;
+  memcpy(norm, dir_path, len);
+  if (needs_slash) norm[len] = '/';
+  norm[norm_len] = '\0';
+
+  for (size_t i = 0; i < g_user_search_paths_count; i++) {
+    if (strcmp(g_user_search_paths[i], norm) == 0) {
+      free(norm);
+      return true;
+    }
+  }
+
+  if (g_user_search_paths_count == g_user_search_paths_capacity) {
+    size_t new_cap = (g_user_search_paths_capacity == 0) ? 8 : (g_user_search_paths_capacity * 2);
+    char **new_arr = (char **)realloc(g_user_search_paths, new_cap * sizeof(char *));
+    if (!new_arr) {
+      free(norm);
+      return false;
+    }
+    g_user_search_paths = new_arr;
+    g_user_search_paths_capacity = new_cap;
+  }
+
+  g_user_search_paths[g_user_search_paths_count++] = norm;
+  return true;
+}
+
+static bool _linker_user_search_paths_add_from_string(const char *paths, char separator, bool reset_existing) {
+  if (reset_existing) _linker_user_search_paths_clear();
+  if (!paths) return true;
+
+  const char *p = paths;
+  while (*p) {
+    const char *start = p;
+    while (*p && *p != separator) p++;
+
+    size_t seg_len = (size_t)(p - start);
+    if (seg_len > 0) {
+      char *seg = (char *)malloc(seg_len + 1);
+      if (!seg) return false;
+      memcpy(seg, start, seg_len);
+      seg[seg_len] = '\0';
+
+      if (!_linker_user_search_paths_add_one(seg)) {
+        free(seg);
+        return false;
+      }
+      free(seg);
+    }
+
+    if (*p == separator) p++;
+  }
+
+  return true;
+}
 
 #if 0
 /* INFO: preinit only is for the main EXECUTABLE. We don't deal with those, not for now, as
@@ -208,7 +290,7 @@ static int _linker_protect_gnu_relro(struct csoloader_elf *img) {
 }
 
 static void _linker_internal_init() {
-  if (system_page_size != 0) return;
+  if (g_linker_internal_inited) return;
 
   /* INFO: If sysconf returns -1, will cause an integer underflow as the variable is to size_t.
              To fix that, we first assign to a long variable, and only after checked, to size_t. */
@@ -218,6 +300,14 @@ static void _linker_internal_init() {
   system_page_size = (size_t)new_system_page_size;
 
   LOGD("System page size: %zu bytes", system_page_size);
+
+  const char *env_paths = getenv("CSOLOADER_LIBRARY_PATH");
+  if (env_paths && env_paths[0] != '\0') {
+    if (!_linker_user_search_paths_add_from_string(env_paths, ':', false))
+      LOGW("Failed to parse CSOLOADER_LIBRARY_PATH");
+  }
+
+  g_linker_internal_inited = true;
 }
 
 static bool _linker_find_library_path(const char *lib_name, char *full_path, size_t full_path_size) {
@@ -264,6 +354,11 @@ static bool _linker_find_library_path(const char *lib_name, char *full_path, siz
     }
   #endif
 
+  for (size_t i = 0; i < g_user_search_paths_count; i++) {
+    snprintf(full_path, full_path_size, "%s%s", g_user_search_paths[i], lib_name);
+    if (access(full_path, F_OK) == 0) return true;
+  }
+
   for (int i = 0; search_paths[i] != NULL; ++i) {
     snprintf(full_path, full_path_size, "%s%s", search_paths[i], lib_name);
 
@@ -277,6 +372,20 @@ static bool _linker_find_library_path(const char *lib_name, char *full_path, siz
 }
 
 /* INFO: Internal functions END */
+
+bool linker_add_library_search_path(const char *dir_path) {
+  _linker_internal_init();
+  return _linker_user_search_paths_add_one(dir_path);
+}
+
+bool linker_add_library_search_paths_from_string(const char *paths, char separator, bool reset_existing) {
+  _linker_internal_init();
+  return _linker_user_search_paths_add_from_string(paths, separator, reset_existing);
+}
+
+void linker_clear_library_search_paths(void) {
+  _linker_user_search_paths_clear();
+}
 
 bool linker_init(struct linker *linker, struct csoloader_elf *img) {
   _linker_internal_init();

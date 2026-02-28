@@ -55,4 +55,10 @@ void linker_abandon(struct linker *linker);
 
 bool linker_link(struct linker *linker);
 
+/* INFO: Optional dependency library search paths.
+         These paths are checked before the built-in default search paths. */
+bool linker_add_library_search_path(const char *dir_path);
+bool linker_add_library_search_paths_from_string(const char *paths, char separator, bool reset_existing);
+void linker_clear_library_search_paths(void);
+
 #endif /* LINKER_H */

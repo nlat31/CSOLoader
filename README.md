@@ -47,6 +47,20 @@ CSOLoader aims to provide a simple API to match the as-simple API that system li
 
 In [csoloader.c](./src/csoloader.c), in `STANDALONE_TEST` `#ifdef`, there is a basic usage of CSOLoader. Usage of CSOLoader's `csoloader_abandon` follows the same as `csoloader_unload`.
 
+### Dependency library search paths
+
+By default, CSOLoader searches dependencies (DT_NEEDED) in a built-in list of directories (e.g. `/system/lib64`, `/vendor/lib64`, `/apex/com.android.runtime/lib64`, ...).
+
+If you need to load a library whose dependencies live outside those defaults (for example, loading `/apex/com.android.art/lib64/libart.so` and resolving its dependencies from the same APEX), you can add extra search directories:
+
+- **Environment variable**: set `CSOLOADER_LIBRARY_PATH` to a colon-separated list of directories (similar to `LD_LIBRARY_PATH`).
+
+```shell
+$ export CSOLOADER_LIBRARY_PATH=/apex/com.android.art/lib64:/apex/com.android.art/lib
+```
+
+- **Programmatic API**: call `linker_add_library_search_path()` (or `linker_add_library_search_paths_from_string()`) before `csoloader_load()`.
+
 ## Documentation
 
 1. `bool csoloader_load(struct csoloader *lib, const char *lib_path)`
