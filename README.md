@@ -43,7 +43,7 @@ $ adb shell su -c /data/local/tmp/csoloader /data/local/tmp/shared.so
 
 ## Usage
 
-CSOLoader aims to provide a simple API to match the as-simple API that system linkers/libdl provides. Currently, there are 6 user-facing APIs.
+CSOLoader aims to provide a simple API to match the as-simple API that system linkers/libdl provides. Currently, there are 7 user-facing APIs.
 
 In [csoloader.c](./src/csoloader.c), in `STANDALONE_TEST` `#ifdef`, there is a basic usage of CSOLoader. Usage of CSOLoader's `csoloader_abandon` follows the same as `csoloader_unload`.
 
@@ -69,23 +69,6 @@ memory so the source library path is not exposed in `/proc/<pid>/maps`.
 Dependencies that CSOLoader must load manually inherit the selected mapping
 mode; dependencies already present in the process are reused unchanged.
 
-### libdl compatibility
-
-Define `CSOLOADER_MAKE_LINKER_HOOKS` to provide custom-loaded libraries with
-CSOLoader-aware `dl_iterate_phdr`, `dladdr`, `dlopen`, `dlsym`, `dlclose`, and
-`dlerror`. `dlsym` supports custom handles, `RTLD_DEFAULT`, and `RTLD_NEXT`
-within the requesting CSOLoader scope, while calls for system handles are
-forwarded to the platform libdl.
-
-`CSOLOADER_HOOK_LIBDL` enables the same libdl bridge without enabling unrelated
-future linker hooks. `CSOLOADER_HOOK_DLADDR` enables only the introspection
-hooks. CSOLoader must remain mapped while code relocated to these bridge
-functions can execute.
-
-Custom `dlopen` handles pin their CSOLoader owner. `csoloader_unload()` returns
-false while such handles or compatibility calls are active; close the handles
-and retry the same `csoloader` object. A successful unload clears the object.
-
 ## Documentation
 
 1. `bool csoloader_load(struct csoloader *lib, const char *lib_path)`
@@ -102,9 +85,7 @@ Loads and links the library using anonymous PT_LOAD mappings.
 
 4. `bool csoloader_unload(struct csoloader *lib)`
 
-Unloads the library from the process' memory from the `csoloader` structure.
-Returns false without clearing the object if custom libdl handles or calls still
-pin it, so the caller can release them and retry.
+Unloads the library from the process' memory from the `csoloader` structure. Returns false if operations fails, and will leak memory if that happens.
 
 5. `bool csoloader_abandon(struct csoloader *lib)`
 
@@ -114,6 +95,10 @@ Frees all internal management handles while allowing it to still continue operat
 
 Gets the symbol address from the loaded library, won't work if the library has been abandoned. Returns NULL if operation failed.
 
+7. `void csoloader_deinit(void)`
+
+Releases global CSOLoader TLS resources after all loaded libraries have been unloaded or abandoned.
+
 ## Features
 
 - [x] Indirect symbol support 
@@ -122,8 +107,7 @@ Gets the symbol address from the loaded library, won't work if the library has b
 - [x] Android-specific relocations support
 - [x] Memory protection
 - [x] Constructors/Deconstructors calling
-- [x] `libdl` functions support (`dl_iterate_phdr`, `dladdr`, `dlopen`,
-      `dlsym`, `dlclose`, `dlerror`)
+- [x] `libdl` functions support (backtrace, dl_iterate_phdr, dladdr)
 - [x] TLS support
 - [x] (EH) Frame register
 - [x] C++ exceptions support (testing)

@@ -34,6 +34,9 @@ bool csoloader_abandon(struct csoloader *lib);
 /* INFO: Get the address of a symbol in the loaded library */
 void *csoloader_get_symbol(struct csoloader *lib, const char *symbol_name);
 
+/* INFO: Deinitialize global CSOLoader resources */
+void csoloader_deinit(void);
+
 #ifdef __cplusplus
 }
 #endif

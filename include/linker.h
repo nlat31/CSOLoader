@@ -56,7 +56,7 @@ bool linker_init(struct linker *linker, struct csoloader_elf *img);
 bool linker_init_ex(struct linker *linker, struct csoloader_elf *img,
                     enum csoloader_mapping_mode mapping_mode);
 
-bool linker_destroy(struct linker *linker);
+void linker_destroy(struct linker *linker);
 
 void linker_abandon(struct linker *linker);
 
