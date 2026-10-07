@@ -387,18 +387,24 @@ void linker_clear_library_search_paths(void) {
   _linker_user_search_paths_clear();
 }
 
-bool linker_init(struct linker *linker, struct csoloader_elf *img) {
+bool linker_init_ex(struct linker *linker, struct csoloader_elf *img,
+                    enum csoloader_mapping_mode mapping_mode) {
   _linker_internal_init();
 
   linker->img = img;
   linker->is_linked = false;
   linker->main_map_size = 0;
   linker->dep_count = 0;
+  linker->mapping_mode = mapping_mode;
   memset(&linker->tls_indices, 0, sizeof(linker->tls_indices));
 
   memset(linker->dependencies, 0, sizeof(linker->dependencies));
 
   return true;
+}
+
+bool linker_init(struct linker *linker, struct csoloader_elf *img) {
+  return linker_init_ex(linker, img, CSOLOADER_MAPPING_FILE_BACKED);
 }
 
 static void _linker_unregister_tls_segment(struct loaded_dep *dep);
@@ -495,7 +501,8 @@ static size_t phdr_get_load_size(const ElfW(Phdr) *phdr, size_t length, ElfW(Add
   return hi - lo;
 }
 
-static int _linker_load_one_segment(int fd, ElfW(Phdr) *phdr, ElfW(Addr) bias, off_t file_off) {
+static int _linker_load_one_segment_file_backed(int fd, ElfW(Phdr) *phdr,
+                                                 ElfW(Addr) bias, off_t file_off) {
   ElfW(Addr) seg_start = phdr->p_vaddr + bias;
   ElfW(Addr) seg_end = seg_start + phdr->p_memsz;
   ElfW(Addr) file_end = seg_start + phdr->p_filesz;
@@ -561,8 +568,62 @@ static int _linker_load_one_segment(int fd, ElfW(Phdr) *phdr, ElfW(Addr) bias, o
   return 0;
 }
 
-void *linker_load_library_manually(const char *lib_path, struct loaded_dep *out) {
+static bool read_fd_exact_at(int fd, void *buf, size_t len, off_t offset) {
+  size_t done = 0;
+  while (done < len) {
+    ssize_t n = TEMP_FAILURE_RETRY(pread(fd, (char *)buf + done, len - done,
+                                        offset + (off_t)done));
+    if (n < 0) {
+      PLOGE("pread ELF segment");
+
+      return false;
+    }
+    if (n == 0) {
+      LOGE("Unexpected EOF while reading ELF segment");
+
+      return false;
+    }
+
+    done += (size_t)n;
+  }
+
+  return true;
+}
+
+static int _linker_load_one_segment_anonymous(int fd, ElfW(Phdr) *phdr,
+                                               ElfW(Addr) bias, off_t file_off) {
+  if (phdr->p_filesz > phdr->p_memsz) {
+    LOGE("ELF segment file size exceeds memory size");
+
+    return -1;
+  }
+
+  if (phdr->p_filesz == 0) return 0;
+
+  /*
+   * The complete load range is reserved as zero-filled anonymous memory.
+   * Copy only the bytes defined by this PT_LOAD entry. Mapping each segment
+   * separately with MAP_FIXED would erase data when two entries share a page.
+   */
+  void *seg_start = (void *)(phdr->p_vaddr + bias);
+  if (!read_fd_exact_at(fd, seg_start, phdr->p_filesz,
+                        file_off + (off_t)phdr->p_offset)) {
+    return -1;
+  }
+
+  return 0;
+}
+
+void *linker_load_library_manually_ex(const char *lib_path, struct loaded_dep *out,
+                                      enum csoloader_mapping_mode mapping_mode) {
   _linker_internal_init();
+
+  if (mapping_mode != CSOLOADER_MAPPING_FILE_BACKED &&
+      mapping_mode != CSOLOADER_MAPPING_ANONYMOUS) {
+    LOGE("Invalid mapping mode for %s", lib_path);
+
+    return NULL;
+  }
 
   int fd = open(lib_path, O_RDONLY | O_CLOEXEC);
   if (fd < 0) {
@@ -612,8 +673,12 @@ void *linker_load_library_manually(const char *lib_path, struct loaded_dep *out)
     return NULL;
   }
 
-  /* One PROT_NONE hole big enough for everything */
-  void *base = mmap(NULL, out->map_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  /* Reserve one hole big enough for everything. Anonymous loading also uses it as storage. */
+  int reserve_prot = mapping_mode == CSOLOADER_MAPPING_ANONYMOUS
+                         ? PROT_READ | PROT_WRITE
+                         : PROT_NONE;
+  void *base = mmap(NULL, out->map_size, reserve_prot,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (base == MAP_FAILED) {
     LOGE("Failed to reserve address space: %s", strerror(errno));
 
@@ -630,7 +695,11 @@ void *linker_load_library_manually(const char *lib_path, struct loaded_dep *out)
   for (int i = 0; i < eh.e_phnum; i++) {
     if (phdr[i].p_type != PT_LOAD) continue;
 
-    if (_linker_load_one_segment(fd, &phdr[i], bias, 0) != 0) {
+    int load_result =
+        mapping_mode == CSOLOADER_MAPPING_ANONYMOUS
+            ? _linker_load_one_segment_anonymous(fd, &phdr[i], bias, 0)
+            : _linker_load_one_segment_file_backed(fd, &phdr[i], bias, 0);
+    if (load_result != 0) {
       LOGE("Failed to load segment %d of %s", i, lib_path);
 
       munmap(base, out->map_size);
@@ -650,6 +719,10 @@ void *linker_load_library_manually(const char *lib_path, struct loaded_dep *out)
   free(phdr);
 
   return base;
+}
+
+void *linker_load_library_manually(const char *lib_path, struct loaded_dep *out) {
+  return linker_load_library_manually_ex(lib_path, out, CSOLOADER_MAPPING_FILE_BACKED);
 }
 
 struct linker_symbol_info {
@@ -1736,7 +1809,7 @@ static bool _linker_is_library_loaded(struct linker *linker, const char *lib_nam
   return false;
 }
 
-static void _linker_restore_protections(struct csoloader_elf *image) {
+static void _linker_restore_protections(struct csoloader_elf *image, bool protect_gaps) {
   ElfW(Phdr) *phdr = (ElfW(Phdr) *)((uintptr_t)image->header + image->header->e_phoff);
 
   /* INFO: Find the minimum and maximum addresses of all loadable segments. */
@@ -1796,7 +1869,8 @@ static void _linker_restore_protections(struct csoloader_elf *image) {
     uintptr_t current_page = start_page_addr + (i * system_page_size);
     int final_prot = page_protections[i];
 
-    if (final_prot != 0 && mprotect((void *)current_page, system_page_size, final_prot) != 0) {
+    if ((final_prot != 0 || protect_gaps) &&
+        mprotect((void *)current_page, system_page_size, final_prot) != 0) {
       LOGW("mprotect failed to restore prot %d for page %p in %s: %s", final_prot, (void *)current_page, image->elf, strerror(errno));
     } else if ((final_prot & PROT_EXEC) && (final_prot & PROT_READ)) {
       __builtin___clear_cache((char *)current_page, (char *)current_page + system_page_size);
@@ -1892,7 +1966,8 @@ bool linker_link(struct linker *linker) {
       current_dep->img = check_img;
       current_dep->is_manual_load = false;
     } else {
-      base_addr = linker_load_library_manually(lib_full_path, current_dep);
+      base_addr = linker_load_library_manually_ex(lib_full_path, current_dep,
+                                                  linker->mapping_mode);
       if (!base_addr) {
         LOGE("Failed to manually load library: %s", lib_full_path);
 
@@ -2014,13 +2089,14 @@ bool linker_link(struct linker *linker) {
   }
 
   LOGD("Restoring memory protections after relocations");
-  _linker_restore_protections(linker->img);
+  bool protect_gaps = linker->mapping_mode == CSOLOADER_MAPPING_ANONYMOUS;
+  _linker_restore_protections(linker->img, protect_gaps);
 
   for (int i = 0; i < linker->dep_count; i++) {
     struct loaded_dep *dep = &linker->dependencies[i];
     if (!dep->is_manual_load) continue;
 
-    _linker_restore_protections(dep->img);
+    _linker_restore_protections(dep->img, protect_gaps);
   }
 
   LOGD("Applying GNU RELRO protection for main library and dependencies.");

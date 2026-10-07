@@ -11,6 +11,7 @@
 #include <stdbool.h>
 
 #include "elf_util.h"
+#include "mapping.h"
 
 #define MAX_DEPS 64
 
@@ -43,11 +44,16 @@ struct linker {
 
   size_t main_map_size;
   bool is_linked;
+  enum csoloader_mapping_mode mapping_mode;
 };
 
 void *linker_load_library_manually(const char *lib_path, struct loaded_dep *dep_info);
+void *linker_load_library_manually_ex(const char *lib_path, struct loaded_dep *dep_info,
+                                      enum csoloader_mapping_mode mapping_mode);
 
 bool linker_init(struct linker *linker, struct csoloader_elf *img);
+bool linker_init_ex(struct linker *linker, struct csoloader_elf *img,
+                    enum csoloader_mapping_mode mapping_mode);
 
 void linker_destroy(struct linker *linker);
 

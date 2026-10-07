@@ -29,9 +29,19 @@ extern int g_argc;
 extern char **g_argv;
 extern char **g_envp;
 
-bool csoloader_load(struct csoloader *lib, const char *lib_path) {
+bool csoloader_load_ex(struct csoloader *lib, const char *lib_path,
+                       const struct csoloader_options *options) {
+  enum csoloader_mapping_mode mapping_mode =
+      options ? options->mapping_mode : CSOLOADER_MAPPING_FILE_BACKED;
+  if (mapping_mode != CSOLOADER_MAPPING_FILE_BACKED &&
+      mapping_mode != CSOLOADER_MAPPING_ANONYMOUS) {
+    LOGE("Invalid mapping mode for %s", lib_path);
+
+    return false;
+  }
+
   struct loaded_dep dep_info = { 0 };
-  void *map_start = linker_load_library_manually(lib_path, &dep_info);
+  void *map_start = linker_load_library_manually_ex(lib_path, &dep_info, mapping_mode);
   if (!map_start) {
     LOGE("Failed to load library: %s", lib_path);
 
@@ -49,7 +59,7 @@ bool csoloader_load(struct csoloader *lib, const char *lib_path) {
   }
 
   struct linker linker;
-  if (!linker_init(&linker, elf_image)) {
+  if (!linker_init_ex(&linker, elf_image, mapping_mode)) {
     LOGE("Failed to initialize linker for %s", lib_path);
 
     csoloader_elf_destroy(elf_image);
@@ -88,6 +98,22 @@ bool csoloader_load(struct csoloader *lib, const char *lib_path) {
   lib->linker = linker;
 
   return true;
+}
+
+bool csoloader_load(struct csoloader *lib, const char *lib_path) {
+  const struct csoloader_options options = {
+    .mapping_mode = CSOLOADER_MAPPING_FILE_BACKED
+  };
+
+  return csoloader_load_ex(lib, lib_path, &options);
+}
+
+bool csoloader_load_anonymous(struct csoloader *lib, const char *lib_path) {
+  const struct csoloader_options options = {
+    .mapping_mode = CSOLOADER_MAPPING_ANONYMOUS
+  };
+
+  return csoloader_load_ex(lib, lib_path, &options);
 }
 
 bool csoloader_unload(struct csoloader *lib) {

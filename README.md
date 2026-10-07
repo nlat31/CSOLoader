@@ -43,7 +43,7 @@ $ adb shell su -c /data/local/tmp/csoloader /data/local/tmp/shared.so
 
 ## Usage
 
-CSOLoader aims to provide a simple API to match the as-simple API that system linkers/libdl provides. Currently, there are only 4 user-facing APIs.
+CSOLoader aims to provide a simple API to match the as-simple API that system linkers/libdl provides. Currently, there are 6 user-facing APIs.
 
 In [csoloader.c](./src/csoloader.c), in `STANDALONE_TEST` `#ifdef`, there is a basic usage of CSOLoader. Usage of CSOLoader's `csoloader_abandon` follows the same as `csoloader_unload`.
 
@@ -61,21 +61,37 @@ $ export CSOLOADER_LIBRARY_PATH=/apex/com.android.art/lib64:/apex/com.android.ar
 
 - **Programmatic API**: call `linker_add_library_search_path()` (or `linker_add_library_search_paths_from_string()`) before `csoloader_load()`.
 
+### Mapping modes
+
+`csoloader_load()` keeps the original file-backed mapping behavior. Use
+`csoloader_load_anonymous()` when PT_LOAD segments must be copied into anonymous
+memory so the source library path is not exposed in `/proc/<pid>/maps`.
+Dependencies that CSOLoader must load manually inherit the selected mapping
+mode; dependencies already present in the process are reused unchanged.
+
 ## Documentation
 
 1. `bool csoloader_load(struct csoloader *lib, const char *lib_path)`
 
-Loads and links the library into the process' memory, and load the info to the `csoloader` structure for future management. Returns false if operations fails, and performs cleanup automatically.
+Loads and links the library with the original file-backed mapping mode, and loads the info to the `csoloader` structure for future management. Returns false if operations fail, and performs cleanup automatically.
 
-2. `bool csoloader_unload(struct csoloader *lib)`
+2. `bool csoloader_load_ex(struct csoloader *lib, const char *lib_path, const struct csoloader_options *options)`
+
+Loads and links the library using the selected mapping mode. A NULL options pointer selects file-backed mapping.
+
+3. `bool csoloader_load_anonymous(struct csoloader *lib, const char *lib_path)`
+
+Loads and links the library using anonymous PT_LOAD mappings.
+
+4. `bool csoloader_unload(struct csoloader *lib)`
 
 Unloads the library from the process' memory from the `csoloader` structure. Returns false if operations fails, and will leak memory if that happens.
 
-3. `bool csoloader_abandon(struct csoloader *lib)`
+5. `bool csoloader_abandon(struct csoloader *lib)`
 
 Frees all internal management handles while allowing it to still continue operation, however, without TLS available. Returns false if operations fails, and will leak memory if that happens.
 
-4. `void *csoloader_get_symbol(struct csoloader *lib, const char *symbol_name)`
+6. `void *csoloader_get_symbol(struct csoloader *lib, const char *symbol_name)`
 
 Gets the symbol address from the loaded library, won't work if the library has been abandoned. Returns NULL if operation failed.
 

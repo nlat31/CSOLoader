@@ -1,0 +1,9 @@
+#ifndef CSOLOADER_MAPPING_H
+#define CSOLOADER_MAPPING_H
+
+enum csoloader_mapping_mode {
+  CSOLOADER_MAPPING_FILE_BACKED = 0,
+  CSOLOADER_MAPPING_ANONYMOUS
+};
+
+#endif /* CSOLOADER_MAPPING_H */

@@ -7,6 +7,7 @@ extern "C" {
 
 #include "elf_util.h"
 #include "linker.h"
+#include "mapping.h"
 
 struct csoloader {
   char *lib_path;
@@ -14,8 +15,15 @@ struct csoloader {
   struct linker linker;
 };
 
+struct csoloader_options {
+  enum csoloader_mapping_mode mapping_mode;
+};
+
 /* INFO: Load a library to memory and link it */
 bool csoloader_load(struct csoloader *lib, const char *lib_path);
+bool csoloader_load_ex(struct csoloader *lib, const char *lib_path,
+                       const struct csoloader_options *options);
+bool csoloader_load_anonymous(struct csoloader *lib, const char *lib_path);
 
 /* INFO: Unload the library and free all related resources */
 bool csoloader_unload(struct csoloader *lib);
