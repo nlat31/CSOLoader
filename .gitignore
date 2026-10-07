@@ -6,6 +6,8 @@
 !shareds/*
 !src/
 !src/*
+!tests/
+!tests/*
 !.gitignore
 !CMakeLists.txt
 !LICENSE

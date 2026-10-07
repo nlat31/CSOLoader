@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.4.1)
+cmake_minimum_required(VERSION 3.10)
 project(csoloader C)
 
 set(CMAKE_C_STANDARD 99)
@@ -11,6 +11,7 @@ add_library(csoloader STATIC ${SOURCES})
 target_include_directories(csoloader PUBLIC include)
 
 target_compile_definitions(csoloader PRIVATE
+    _GNU_SOURCE
     _FORTIFY_SOURCE=2
     $<$<CONFIG:Debug>:CSOLOADER_DEBUG>
 )

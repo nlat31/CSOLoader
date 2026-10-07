@@ -48,23 +48,36 @@ struct linker {
 };
 
 void *linker_load_library_manually(const char *lib_path, struct loaded_dep *dep_info);
-void *linker_load_library_manually_ex(const char *lib_path, struct loaded_dep *dep_info,
+void *linker_load_library_manually_ex(const char *lib_path,
+                                      struct loaded_dep *dep_info,
                                       enum csoloader_mapping_mode mapping_mode);
 
 bool linker_init(struct linker *linker, struct csoloader_elf *img);
 bool linker_init_ex(struct linker *linker, struct csoloader_elf *img,
                     enum csoloader_mapping_mode mapping_mode);
 
-void linker_destroy(struct linker *linker);
+bool linker_destroy(struct linker *linker);
 
 void linker_abandon(struct linker *linker);
 
 bool linker_link(struct linker *linker);
 
-/* INFO: Optional dependency library search paths.
-         These paths are checked before the built-in default search paths. */
+void *linker_dlsym_default(struct linker *linker, const char *symbol);
+
+void *linker_dlsym_handle(struct linker *linker,
+                          struct csoloader_elf *requester,
+                          const char *symbol);
+
+void *linker_dlsym_next(struct linker *linker,
+                        struct csoloader_elf *requester,
+                        const char *symbol);
+
 bool linker_add_library_search_path(const char *dir_path);
-bool linker_add_library_search_paths_from_string(const char *paths, char separator, bool reset_existing);
+bool linker_add_library_search_paths_from_string(const char *paths,
+                                                 char separator,
+                                                 bool reset_existing);
 void linker_clear_library_search_paths(void);
+
+void linker_deinit(void);
 
 #endif /* LINKER_H */

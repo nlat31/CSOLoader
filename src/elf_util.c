@@ -39,6 +39,10 @@
   #endif
 #endif
 
+#ifndef ELF_ST_VISIBILITY
+  #define ELF_ST_VISIBILITY(o) ((o) & 0x3)
+#endif
+
 static uint32_t elf_hash(const char *name) {
   uint32_t h = 0, g = 0;
 
@@ -162,6 +166,7 @@ void csoloader_elf_destroy(struct csoloader_elf *img) {
     img->header = NULL;
   }
 
+  pthread_mutex_destroy(&img->symtabs_mutex);
   free(img);
 }
 
@@ -173,11 +178,18 @@ struct csoloader_elf *csoloader_elf_create(const char *elf, void *base) {
     return NULL;
   }
 
+  if (pthread_mutex_init(&img->symtabs_mutex, NULL) != 0) {
+    LOGE("Failed to initialize symtabs mutex");
+    free(img);
+
+    return NULL;
+  }
+
   img->elf = strdup(elf);
   if (!img->elf) {
     LOGE("Failed to duplicate elf path string");
 
-    free(img);
+    csoloader_elf_destroy(img);
 
     return NULL;
   }
@@ -456,11 +468,13 @@ struct csoloader_elf *csoloader_elf_create(const char *elf, void *base) {
   bool bias_calculated = false;
   if (img->header->e_phoff > 0 && img->header->e_phnum > 0) {
     ElfW(Phdr) *phdr = (ElfW(Phdr) *)((uintptr_t)img->header + img->header->e_phoff);
-    ElfW(Dyn) *dyn = NULL;
+    ElfW(Addr) dynamic_vaddr = 0;
+    bool dynamic_found = false;
 
     for (int i = 0; i < img->header->e_phnum; ++i) {
       if (phdr[i].p_type == PT_DYNAMIC) {
-        dyn = (ElfW(Dyn) *)((uintptr_t)img->base + phdr[i].p_vaddr - img->bias);
+        dynamic_vaddr = phdr[i].p_vaddr;
+        dynamic_found = true;
 
         // LOGD("Located PT_DYNAMIC segment at virtual address: 0x%llu", (unsigned long long)phdr[i].p_vaddr);
       }
@@ -478,6 +492,21 @@ struct csoloader_elf *csoloader_elf_create(const char *elf, void *base) {
         // LOGD("Calculated bias %ld from PT_LOAD segment %d (vaddr %lx)", (long)img->bias, i, (unsigned long)phdr[i].p_vaddr);
       }
     }
+
+    if (!bias_calculated) for (int i = 0; i < img->header->e_phnum; ++i) {
+      if (phdr[i].p_type != PT_LOAD) continue;
+
+      img->bias = phdr[i].p_vaddr - phdr[i].p_offset;
+      bias_calculated = true;
+
+      // LOGD("Calculated bias %ld from first PT_LOAD segment %d (vaddr %lx, offset %lx)", (long)img->bias, i, (unsigned long)phdr[i].p_vaddr, (unsigned long)phdr[i].p_offset);
+
+      break;
+    }
+
+    ElfW(Dyn) *dyn = NULL;
+    if (dynamic_found)
+      dyn = (ElfW(Dyn) *)((uintptr_t)img->base + dynamic_vaddr - img->bias);
 
     if (dyn) for (ElfW(Dyn) *d = dyn; d->d_tag != DT_NULL; ++d) {
       uintptr_t ptr_val = (uintptr_t)img->base + d->d_un.d_ptr - img->bias;
@@ -539,18 +568,6 @@ struct csoloader_elf *csoloader_elf_create(const char *elf, void *base) {
           break;
         }
       }
-    }
-
-    if (!bias_calculated) for (int i = 0; i < img->header->e_phnum; ++i) {
-      if (phdr[i].p_type != PT_LOAD) continue;
-
-      img->bias = phdr[i].p_vaddr - phdr[i].p_offset;
-      bias_calculated = true;
-
-      // LOGD("Calculated bias %ld from first PT_LOAD segment %d (vaddr %lx, offset %lx)",
-      //     (long)img->bias, i, (unsigned long)phdr[i].p_vaddr, (unsigned long)phdr[i].p_offset);
-
-      break;
     }
 
     /* INFO: Populate EH regions from Program Headers when possible */
@@ -628,10 +645,16 @@ struct csoloader_elf *csoloader_elf_create(const char *elf, void *base) {
 }
 
 static bool load_symtabs(struct csoloader_elf *img) {
-  if (img->symtabs_) return true;
+  pthread_mutex_lock(&img->symtabs_mutex);
+  if (img->symtabs_) {
+    pthread_mutex_unlock(&img->symtabs_mutex);
+
+    return true;
+  }
 
   if (!img->symtab_start || img->symstr_offset_for_symtab == 0 || img->symtab_count == 0) {
     // LOGE("Cannot load symtabs: .symtab section or its string table not found/valid.");
+    pthread_mutex_unlock(&img->symtabs_mutex);
 
     return false;
   }
@@ -639,13 +662,16 @@ static bool load_symtabs(struct csoloader_elf *img) {
   size_t valid_symtabs_amount = calculate_valid_symtabs_amount(img);
   if (valid_symtabs_amount == 0) {
     LOGW("No valid symbols (FUNC/OBJECT with size > 0) found in .symtab for %s", img->elf);
+    pthread_mutex_unlock(&img->symtabs_mutex);
 
     return false;
   }
 
-  img->symtabs_ = (struct symtabs *)calloc(valid_symtabs_amount, sizeof(struct symtabs));
-  if (!img->symtabs_) {
+  struct symtabs *new_symtabs =
+    (struct symtabs *)calloc(valid_symtabs_amount, sizeof(struct symtabs));
+  if (!new_symtabs) {
     LOGE("Failed to allocate memory for symtabs array");
+    pthread_mutex_unlock(&img->symtabs_mutex);
 
     return false;
   }
@@ -669,31 +695,50 @@ static bool load_symtabs(struct csoloader_elf *img) {
         continue;
       }
 
-      img->symtabs_[current_valid_index].name = strdup(st_name);
-      if (!img->symtabs_[current_valid_index].name) {
+      new_symtabs[current_valid_index].name = strdup(st_name);
+      if (!new_symtabs[current_valid_index].name) {
         LOGE("Failed to duplicate symbol name: %s", st_name);
 
         for(size_t k = 0; k < current_valid_index; ++k) {
-          free(img->symtabs_[k].name);
+          free(new_symtabs[k].name);
         }
 
-        free(img->symtabs_);
-        img->symtabs_ = NULL;
+        free(new_symtabs);
+        pthread_mutex_unlock(&img->symtabs_mutex);
 
         return false;
       }
 
-      img->symtabs_[current_valid_index].sym = current_sym;
+      new_symtabs[current_valid_index].sym = current_sym;
 
       current_valid_index++;
       if (current_valid_index == valid_symtabs_amount) break;
     }
   }
 
+  img->symtabs_ = new_symtabs;
+  pthread_mutex_unlock(&img->symtabs_mutex);
+
   return true;
 }
 
-static ElfW(Addr) gnu_symbol_lookup(struct csoloader_elf *restrict img, const char *name, uint32_t hash, unsigned char *sym_type) {
+static bool is_dynamic_symbol_visible(const ElfW(Sym) *sym, bool exported_only) {
+  if (!sym || sym->st_shndx == SHN_UNDEF) return false;
+  if (!exported_only) return true;
+
+  unsigned char bind = ELF_ST_BIND(sym->st_info);
+  unsigned char vis = ELF_ST_VISIBILITY(sym->st_other);
+
+  if (bind != STB_GLOBAL && bind != STB_WEAK
+    #ifdef STB_GNU_UNIQUE
+      && bind != STB_GNU_UNIQUE
+    #endif
+  ) return false;
+
+  return vis == STV_DEFAULT || vis == STV_PROTECTED;
+}
+
+static ElfW(Addr) gnu_symbol_lookup(struct csoloader_elf *restrict img, const char *name, uint32_t hash, unsigned char *sym_type, bool exported_only) {
   if (img->gnu_nbucket_ == 0 || img->gnu_bloom_size_ == 0 || !img->gnu_bloom_filter_ || !img->gnu_bucket_ || !img->gnu_chain_ || !img->dynsym_start || !img->strtab_start)
     return 0;
 
@@ -738,7 +783,7 @@ static ElfW(Addr) gnu_symbol_lookup(struct csoloader_elf *restrict img, const ch
     return 0;
   }
 
-  if ((((chain_val ^ hash) >> 1) == 0 && strcmp(name, strings + sym->st_name) == 0) && sym->st_shndx != SHN_UNDEF) {
+  if ((((chain_val ^ hash) >> 1) == 0 && strcmp(name, strings + sym->st_name) == 0) && is_dynamic_symbol_visible(sym, exported_only)) {
     unsigned int type = ELF_ST_TYPE(sym->st_info);
     if (sym_type) *sym_type = type;
 
@@ -763,7 +808,7 @@ static ElfW(Addr) gnu_symbol_lookup(struct csoloader_elf *restrict img, const ch
       break;
     }
 
-    if ((((chain_val ^ hash) >> 1) == 0 && strcmp(name, strings + sym->st_name) == 0) && sym->st_shndx != SHN_UNDEF) {
+    if ((((chain_val ^ hash) >> 1) == 0 && strcmp(name, strings + sym->st_name) == 0) && is_dynamic_symbol_visible(sym, exported_only)) {
       unsigned int type = ELF_ST_TYPE(sym->st_info);
       if (sym_type) *sym_type = type;
 
@@ -774,7 +819,7 @@ static ElfW(Addr) gnu_symbol_lookup(struct csoloader_elf *restrict img, const ch
   return 0;
 }
 
-static ElfW(Addr) elf_symbol_lookup(struct csoloader_elf *restrict img, const char *restrict name, uint32_t hash, unsigned char *sym_type) {
+static ElfW(Addr) elf_symbol_lookup(struct csoloader_elf *restrict img, const char *restrict name, uint32_t hash, unsigned char *sym_type, bool exported_only) {
   if (img->nbucket_ == 0 || !img->bucket_ || !img->chain_ || !img->dynsym_start || !img->strtab_start)
     return 0;
 
@@ -783,7 +828,7 @@ static ElfW(Addr) elf_symbol_lookup(struct csoloader_elf *restrict img, const ch
   for (size_t n = img->bucket_[hash % img->nbucket_]; n != STN_UNDEF; n = img->chain_[n]) {
     ElfW(Sym) *sym = img->dynsym_start + n;
 
-    if (strcmp(name, strings + sym->st_name) == 0 && sym->st_shndx != SHN_UNDEF) {
+    if (strcmp(name, strings + sym->st_name) == 0 && is_dynamic_symbol_visible(sym, exported_only)) {
       unsigned int type = ELF_ST_TYPE(sym->st_info);
       if (sym_type) *sym_type = type;
 
@@ -794,37 +839,7 @@ static ElfW(Addr) elf_symbol_lookup(struct csoloader_elf *restrict img, const ch
   return 0;
 }
 
-static ElfW(Addr) linear_symbol_lookup(struct csoloader_elf *img, const char *restrict name, unsigned char *sym_type) {
-  if (!load_symtabs(img)) {
-    // LOGE("Failed to load symtabs for linear lookup of %s", name);
-
-    return 0;
-  }
-
-  size_t valid_symtabs_amount = calculate_valid_symtabs_amount(img);
-  if (valid_symtabs_amount == 0) {
-    LOGW("No valid symbols (FUNC/OBJECT with size > 0) found in .symtab for %s", img->elf);
-
-    return 0;
-  }
-
-  for (size_t i = 0; i < valid_symtabs_amount; i++) {
-    if (!img->symtabs_[i].name || strcmp(name, img->symtabs_[i].name) != 0)
-      continue;
-
-    if (img->symtabs_[i].sym->st_shndx == SHN_UNDEF)
-      continue;
-
-    unsigned int type = ELF_ST_TYPE(img->symtabs_[i].sym->st_info);
-    if (sym_type) *sym_type = type;
-
-    return img->symtabs_[i].sym->st_value;
-  }
-
-  return 0;
-}
-
-static ElfW(Addr) linear_symbol_lookupByPrefix(struct csoloader_elf *img, const char *prefix, unsigned char *sym_type) {
+static ElfW(Addr) linear_symbol_lookup_by_prefix(struct csoloader_elf *img, const char *prefix, unsigned char *sym_type) {
   if (!load_symtabs(img)) {
     LOGE("Failed to load symtabs for linear lookup by prefix of %s", prefix);
 
@@ -863,16 +878,34 @@ static ElfW(Addr) linear_symbol_lookupByPrefix(struct csoloader_elf *img, const 
 ElfW(Addr) csoloader_elf_symb_offset(struct csoloader_elf *img, const char *name, unsigned char *sym_type) {
   ElfW(Addr) offset = 0;
 
-  offset = gnu_symbol_lookup(img, name, gnu_hash(name), sym_type);
+  offset = gnu_symbol_lookup(img, name, gnu_hash(name), sym_type, false);
   if (offset != 0) return offset;
 
-  offset = elf_symbol_lookup(img, name, elf_hash(name), sym_type);
+  offset = elf_symbol_lookup(img, name, elf_hash(name), sym_type, false);
   if (offset != 0) return offset;
 
-  offset = linear_symbol_lookup(img, name, sym_type);
-  if (offset != 0) return offset;
+  /* INFO: Do not fall back to .symtab for dynamic linker resolution.
+             We only resolve against dynamic export tables. */
 
   return 0;
+}
+
+static ElfW(Addr) handle_indirect_symbol(struct csoloader_elf *img, ElfW(Off) offset);
+
+ElfW(Addr) csoloader_elf_symb_address_exported(struct csoloader_elf *img, const char *name) {
+  unsigned char sym_type = 0;
+  ElfW(Addr) offset = 0;
+
+  offset = gnu_symbol_lookup(img, name, gnu_hash(name), &sym_type, true);
+  if (offset == 0)
+    offset = elf_symbol_lookup(img, name, elf_hash(name), &sym_type, true);
+
+  if (offset == 0 || !img->base) return 0;
+
+  if (sym_type == STT_GNU_IFUNC)
+    return handle_indirect_symbol(img, offset);
+
+  return (ElfW(Addr))((uintptr_t)img->base + offset - img->bias);
 }
 
 #ifdef __aarch64__
@@ -951,7 +984,7 @@ ElfW(Addr) csoloader_elf_symb_address(struct csoloader_elf *img, const char *nam
 
 ElfW(Addr) csoloader_elf_symb_address_by_prefix(struct csoloader_elf *img, const char *prefix) {
   unsigned char sym_type = 0;
-  ElfW(Addr) offset = linear_symbol_lookupByPrefix(img, prefix, &sym_type);
+  ElfW(Addr) offset = linear_symbol_lookup_by_prefix(img, prefix, &sym_type);
 
   if (offset == 0 || !img->base) return 0;
 
@@ -988,7 +1021,7 @@ struct sym_info csoloader_elf_get_symbol(struct csoloader_elf *img, uintptr_t ad
 
   for (size_t i = 0; i < valid_symtabs_amount; i++) {
     ElfW(Sym) *sym = img->symtabs_[i].sym;
-    if (sym->st_value == 0 || sym->st_size == 0) continue;
+    if (!sym || sym->st_value == 0 || sym->st_size == 0) continue;
 
     ElfW(Addr) sym_start = (ElfW(Addr))((uintptr_t)img->base + sym->st_value - img->bias);
     ElfW(Addr) sym_end = sym_start + sym->st_size;

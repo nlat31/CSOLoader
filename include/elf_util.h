@@ -63,6 +63,7 @@ struct csoloader_elf {
   size_t tls_mod_id;
 
   struct symtabs *symtabs_;
+  pthread_mutex_t symtabs_mutex;
 
   linker_ctor_function_t *preinit_array;
   size_t preinit_array_count;
@@ -102,6 +103,8 @@ struct csoloader_elf *csoloader_elf_create(const char *elf, void *base);
 ElfW(Addr) csoloader_elf_symb_offset(struct csoloader_elf *img, const char *name, unsigned char *sym_type);
 
 ElfW(Addr) csoloader_elf_symb_address(struct csoloader_elf *img, const char *name);
+
+ElfW(Addr) csoloader_elf_symb_address_exported(struct csoloader_elf *img, const char *name);
 
 ElfW(Addr) csoloader_elf_symb_address_by_prefix(struct csoloader_elf *img, const char *prefix);
 
